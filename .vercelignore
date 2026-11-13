@@ -1,0 +1,7 @@
+.env*
+.convex/
+.agents/
+.claude/
+.codex/
+node_modules/
+.next/

@@ -1,5 +1,72 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## Architecture documentation
+
+See the [Salesforce Lead Hub architecture document](docs/PROJECT_GUIDE.md) for the system design, runtime flows,
+component reference, Clerk and Convex authentication flows, Salesforce and Slack
+integrations, environment setup, API reference, and local testing instructions.
+
+## Clerk and Convex authentication
+
+The existing Clerk application, `ClerkProvider`, `proxy.ts`, and sign-in/sign-up
+routes are preserved. The client provider inside Clerk passes `useAuth` to
+`ConvexProviderWithClerk`, following the
+[official Convex guide](https://docs.convex.dev/auth/clerk#nextjs).
+
+Keep these variables in `.env.local` and your Next.js hosting environment:
+
+| Variable | Value |
+| --- | --- |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Existing Clerk instance's publishable key |
+| `CLERK_SECRET_KEY` | Existing Clerk secret key; server only |
+| `NEXT_PUBLIC_CONVEX_URL` | Matching Convex deployment URL |
+| `CONVEX_DEPLOYMENT` | Existing CLI deployment selection, maintained by Convex |
+
+Keep the existing Clerk sign-in/sign-up URL and redirect variables as well.
+
+In **Convex Dashboard → your deployment → Settings → Environment Variables**, set:
+
+```text
+CLERK_JWT_ISSUER_DOMAIN=https://your-instance.clerk.accounts.dev
+```
+
+Use the exact **Frontend API URL** from the existing Clerk application's API Keys
+or Convex integration page, including `https://`. Do not use the sign-in URL,
+publishable key, or Convex URL as the issuer. `convex/auth.config.ts` validates this
+issuer and the `convex` audience (`applicationID`). No Clerk secret key is needed
+in Convex. For a local backend, configure the same variable using
+`npx convex env set CLERK_JWT_ISSUER_DOMAIN https://your-instance.clerk.accounts.dev`.
+Setting it only in Next.js's `.env.local` does not configure the backend.
+
+Configure this variable separately on each Convex deployment. Development should
+use the development Clerk instance; production should use its matching production
+Frontend API URL (often `https://clerk.your-domain.com`) and matching Next.js Clerk
+keys. After configuring it, run `npx convex dev` to sync local/development functions
+and auth configuration. Production deployment is a separate release step.
+
+To verify:
+
+1. Run `npx convex dev` and `npm run dev` in separate terminals.
+2. Open `http://localhost:3000/auth-test` while signed out. It should offer sign-in
+   and must not display a verified identity.
+3. Sign in with your existing Clerk application. The page should show
+   **Success: Convex verified your Clerk identity.**, the matching Clerk user ID,
+   and the configured issuer. Refresh to verify the session persists.
+4. Sign out using the user menu. The verified identity should disappear.
+5. Run `npx convex run authTest:viewer '{}'` without an identity. It should fail
+   with **Not authenticated**, proving the backend rejects unauthenticated calls.
+
+The test query derives identity from `ctx.auth.getUserIdentity()` and accepts no
+user ID arguments. Its UI mounts only within Convex's `Authenticated` component,
+so a Clerk session alone cannot produce a success result. It displays no tokens
+or secrets and stores no data. If Clerk signs in but Convex does not authenticate,
+check that the issuer matches the Clerk instance, the Clerk Convex integration is
+active, the backend configuration has synced, and the frontend points at that backend.
+
+Checks: `npm run lint`, `npx tsc --noEmit`, and `npm run build`. If Turbopack cannot
+create its worker process in a restricted environment, try
+`npm run build -- --webpack`. The existing Google fonts require network access.
+
 ## Getting Started
 
 First, run the development server:
