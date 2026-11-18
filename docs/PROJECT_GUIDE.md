@@ -297,7 +297,7 @@ All public note functions use argument and return validators. Their implementati
 | `api.leadNotes.create` | `salesforceLeadId`, `content` | New note ID | Requires verified identity and derives both owner fields from it |
 | `api.leadNotes.update` | `noteId`, `content` | `null` | Loads the document and checks both owner identity and Clerk subject before editing |
 | `api.leadNotes.remove` | `noteId` | `null` | Loads the document and checks both owner fields before deletion |
-| `api.authTest.viewer` | None | `{ subject, issuer }` | Requires verified identity |
+| `api.authTest.viewer` | None | `{ subject, issuer }` | Requires an approved Clerk identity |
 
 `requireIdentity` rejects signed-out calls. `requireOwnedNote` uses the same error for an absent note and another user's note. Clients cannot change owner fields or the Lead association through an update.
 

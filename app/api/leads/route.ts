@@ -1,12 +1,16 @@
-import { auth } from "@clerk/nextjs/server";
+import { getLeadHubAccessStatus } from "@/src/lib/authorization";
 import { getSalesforceLeads, SalesforceError } from "@/lib/salesforce";
 import type { LeadsResponse } from "@/lib/leads";
 
 export async function GET() {
   const headers = { "Cache-Control": "private, no-store" };
-  const { isAuthenticated } = await auth();
-  if (!isAuthenticated) {
+  const accessStatus = await getLeadHubAccessStatus();
+  if (accessStatus === 401) {
     return Response.json({ error: "Sign in to view Salesforce Leads." } satisfies LeadsResponse, { status: 401, headers });
+  }
+
+  if (accessStatus === 403) {
+    return Response.json({ error: "You do not have access to Salesforce Lead Hub." }, { status: 403, headers });
   }
 
   try {

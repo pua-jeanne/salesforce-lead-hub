@@ -1,4 +1,5 @@
-import { ConvexError, v } from "convex/values";
+import { v } from "convex/values";
+import { requireApprovedClerkIdentity } from "../lib/convex-authorization";
 import { query } from "./_generated/server";
 
 // Identity comes only from the verified token, never from client arguments.
@@ -6,10 +7,7 @@ export const viewer = query({
   args: {},
   returns: v.object({ subject: v.string(), issuer: v.string() }),
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (identity === null) {
-      throw new ConvexError("Not authenticated");
-    }
+    const identity = await requireApprovedClerkIdentity(ctx.auth, "Not authenticated");
     return { subject: identity.subject, issuer: identity.issuer };
   },
 });

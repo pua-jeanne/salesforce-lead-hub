@@ -49,7 +49,7 @@ To verify:
 1. Run `npx convex dev` and `npm run dev` in separate terminals.
 2. Open `http://localhost:3000/auth-test` while signed out. It should offer sign-in
    and must not display a verified identity.
-3. Sign in with your existing Clerk application. The page should show
+3. Approve your Clerk user ID as described below, then sign in. The page should show
    **Success: Convex verified your Clerk identity.**, the matching Clerk user ID,
    and the configured issuer. Refresh to verify the session persists.
 4. Sign out using the user menu. The verified identity should disappear.
@@ -66,6 +66,20 @@ active, the backend configuration has synced, and the frontend points at that ba
 Checks: `npm run lint`, `npx tsc --noEmit`, and `npm run build`. If Turbopack cannot
 create its worker process in a restricted environment, try
 `npm run build -- --webpack`. The existing Google fonts require network access.
+
+## Approve Lead Hub users
+
+Keep Clerk registration in Invite-only mode. After a user accepts an invitation,
+copy their Clerk user ID into the comma-separated `AUTHORIZED_CLERK_USER_IDS`
+setting in both environments that serve the app:
+
+- Next.js server environment (`.env.local` for local development, Vercel environment variables for hosted deployments)
+- Convex deployment environment (Settings → Environment Variables)
+
+Use the same approved IDs in both settings for each matching Clerk instance.
+An empty or missing list denies access to Salesforce leads, Slack notifications,
+and lead notes. Remove a user's ID from both settings to revoke their access.
+Find the IDs in the Clerk Dashboard under Users.
 
 ## Getting Started
 
