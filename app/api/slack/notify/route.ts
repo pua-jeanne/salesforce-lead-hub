@@ -1,12 +1,18 @@
-import { auth } from "@clerk/nextjs/server";
+// Lets approved users send a Slack notification for a Salesforce lead.
+
+import { getLeadHubAccessStatus } from "@/src/lib/authorization";
 import { getSalesforceLeads, SalesforceError } from "@/lib/salesforce";
 import { notifySlack, SlackError } from "@/lib/slack";
 
 export async function POST(request: Request) {
   const headers = { "Cache-Control": "private, no-store" };
-  const { isAuthenticated } = await auth();
-  if (!isAuthenticated) {
+  const accessStatus = await getLeadHubAccessStatus();
+  if (accessStatus === 401) {
     return Response.json({ error: "Sign in to notify Slack." }, { status: 401, headers });
+  }
+
+  if (accessStatus === 403) {
+    return Response.json({ error: "You do not have access to Salesforce Lead Hub." }, { status: 403, headers });
   }
 
   const origin = request.headers.get("Origin");

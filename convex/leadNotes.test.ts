@@ -1,7 +1,9 @@
+// Tests Convex approval checks, note ownership, validation, and pagination.
+
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./_generated/api";
 import schema from "./schema";
 
@@ -12,7 +14,47 @@ const alice = { subject: "user_alice", issuer: "https://clerk.example", tokenIde
 const bob = { subject: "user_bob", issuer: "https://clerk.example", tokenIdentifier: "https://clerk.example|user_bob" };
 const paginationOpts = { numItems: 10, cursor: null };
 
+beforeEach(() => {
+  vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", " user_alice, user_bob ");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("auth diagnostic", () => {
+  it("returns a verified identity only for an approved user", async () => {
+    const t = convexTest(schema, modules);
+    await expect(t.query(api.authTest.viewer, {})).rejects.toThrow("Not authenticated");
+    await expect(t.withIdentity(alice).query(api.authTest.viewer, {}))
+      .resolves.toEqual({ subject: alice.subject, issuer: alice.issuer });
+    vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", bob.subject);
+    await expect(t.withIdentity(alice).query(api.authTest.viewer, {})).rejects.toThrow("You do not have access");
+  });
+});
+
 describe("lead notes", () => {
+  it("denies all note operations after a signed-in owner loses approval", async () => {
+    const t = convexTest(schema, modules);
+    const user = t.withIdentity(alice);
+    const noteId = await user.mutation(api.leadNotes.create, { salesforceLeadId: leadId, content: "Private" });
+    vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", bob.subject);
+
+    const denied = "You do not have access to Salesforce Lead Hub.";
+    await expect(user.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts })).rejects.toThrow(denied);
+    await expect(user.mutation(api.leadNotes.create, { salesforceLeadId: leadId, content: "New" })).rejects.toThrow(denied);
+    await expect(user.mutation(api.leadNotes.update, { noteId, content: "Changed" })).rejects.toThrow(denied);
+    await expect(user.mutation(api.leadNotes.remove, { noteId })).rejects.toThrow(denied);
+    expect(await t.run((ctx) => ctx.db.get("leadNotes", noteId))).toMatchObject({ content: "Private" });
+  });
+
+  it.each([undefined, "", " , "])("denies access with no approved IDs (%s)", async (value) => {
+    vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", value);
+    const user = convexTest(schema, modules).withIdentity(alice);
+    await expect(user.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts }))
+      .rejects.toThrow("You do not have access");
+  });
+
   it("persists CRUD with verified ownership and scopes reads to the Lead", async () => {
     const t = convexTest(schema, modules);
     const user = t.withIdentity(alice);

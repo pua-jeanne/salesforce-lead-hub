@@ -1,16 +1,12 @@
-//Save Lead Notes to Convex
+// Lists and manages Salesforce lead notes owned by the approved caller.
+
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
+import { requireApprovedClerkIdentity } from "../lib/convex-authorization";
 import { MAX_NOTE_LENGTH } from "../lib/note-limits";
-import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
-
-async function requireIdentity(ctx: QueryCtx | MutationCtx) {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity) throw new ConvexError("Sign in to manage your notes.");
-  return identity;
-}
 
 function validateLeadId(leadId: string) {
   if (!/^00Q[a-zA-Z0-9]{12}([a-zA-Z0-9]{3})?$/.test(leadId)) {
@@ -27,7 +23,7 @@ function validateContent(content: string) {
 }
 
 async function requireOwnedNote(ctx: MutationCtx, noteId: Id<"leadNotes">) {
-  const identity = await requireIdentity(ctx);
+  const identity = await requireApprovedClerkIdentity(ctx.auth, "Sign in to manage your notes.");
   const note = await ctx.db.get("leadNotes", noteId);
   // Use the same error for an absent note and another user's note.
   if (!note || note.ownerIdentity !== identity.tokenIdentifier || note.clerkUserId !== identity.subject) {
@@ -40,7 +36,7 @@ export const list = query({
   args: { salesforceLeadId: v.string(), paginationOpts: paginationOptsValidator },
   returns: paginationResultValidator(schema.doc("leadNotes")),
   handler: async (ctx, args) => {
-    const identity = await requireIdentity(ctx);
+    const identity = await requireApprovedClerkIdentity(ctx.auth, "Sign in to manage your notes.");
     validateLeadId(args.salesforceLeadId);
     return await ctx.db.query("leadNotes")
       .withIndex("by_ownerIdentity_and_salesforceLeadId", (q) =>
@@ -55,7 +51,7 @@ export const create = mutation({
   args: { salesforceLeadId: v.string(), content: v.string() },
   returns: v.id("leadNotes"),
   handler: async (ctx, args) => {
-    const identity = await requireIdentity(ctx);
+    const identity = await requireApprovedClerkIdentity(ctx.auth, "Sign in to manage your notes.");
     validateLeadId(args.salesforceLeadId);
     const content = validateContent(args.content);
     const now = Date.now();
