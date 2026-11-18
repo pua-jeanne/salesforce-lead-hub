@@ -1,3 +1,5 @@
+// Tests authorization on the Salesforce leads and Slack notification routes.
+
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GET } from "../app/api/leads/route";

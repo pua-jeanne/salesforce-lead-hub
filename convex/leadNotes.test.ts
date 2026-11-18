@@ -1,3 +1,5 @@
+// Tests Convex approval checks, note ownership, validation, and pagination.
+
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";

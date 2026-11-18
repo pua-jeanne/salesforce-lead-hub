@@ -1,3 +1,5 @@
+// Configures Vitest for Convex and Next.js route tests.
+
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 

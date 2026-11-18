@@ -1,3 +1,5 @@
+// Lets approved users send a Slack notification for a Salesforce lead.
+
 import { getLeadHubAccessStatus } from "@/src/lib/authorization";
 import { getSalesforceLeads, SalesforceError } from "@/lib/salesforce";
 import { notifySlack, SlackError } from "@/lib/slack";

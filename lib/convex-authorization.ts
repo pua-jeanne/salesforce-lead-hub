@@ -1,3 +1,5 @@
+// Requires a verified, approved Clerk identity for Convex functions.
+
 import type { Auth } from "convex/server";
 import { ConvexError } from "convex/values";
 import { isApprovedClerkUser } from "./approved-users";

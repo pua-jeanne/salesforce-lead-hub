@@ -1,3 +1,5 @@
+// Serves Salesforce leads to signed-in users approved for Lead Hub.
+
 import { getLeadHubAccessStatus } from "@/src/lib/authorization";
 import { getSalesforceLeads, SalesforceError } from "@/lib/salesforce";
 import type { LeadsResponse } from "@/lib/leads";

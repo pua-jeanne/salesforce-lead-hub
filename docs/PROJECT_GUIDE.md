@@ -1,3 +1,5 @@
+<!-- Describes the Lead Hub architecture, integrations, data model, and deployment. -->
+
 # Salesforce Lead Hub architecture
 
 | Document attribute | Value |

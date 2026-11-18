@@ -1,4 +1,5 @@
-//Save Lead Notes to Convex
+// Lists and manages Salesforce lead notes owned by the approved caller.
+
 import { paginationOptsValidator, paginationResultValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { requireApprovedClerkIdentity } from "../lib/convex-authorization";

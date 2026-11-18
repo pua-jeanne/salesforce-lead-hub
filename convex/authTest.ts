@@ -1,3 +1,5 @@
+// Verifies that Convex receives the expected Clerk identity for an approved user.
+
 import { v } from "convex/values";
 import { requireApprovedClerkIdentity } from "../lib/convex-authorization";
 import { query } from "./_generated/server";
