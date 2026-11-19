@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { Lead } from "./leads";
+import { LEADS_PAGE_SIZE, LEAD_FILTER_MAX_LENGTH, type Lead, type LeadsPage } from "./leads";
 
 export class SalesforceError extends Error {
   constructor(message: string, public readonly status: number = 502) {
@@ -47,7 +47,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-export async function getSalesforceLeads(): Promise<Lead[]> {
+async function getSalesforceConnection() {
   const loginUrl = process.env.SALESFORCE_LOGIN_URL?.trim();
   const clientId = process.env.SALESFORCE_CLIENT_ID?.trim();
   const clientSecret = process.env.SALESFORCE_CLIENT_SECRET?.trim();
@@ -92,12 +92,18 @@ export async function getSalesforceLeads(): Promise<Lead[]> {
     throw new SalesforceError("Salesforce OAuth returned an invalid instance URL.");
   }
 
-  // Fixed query and field list keep this endpoint read-only and bounded.
+  return { instanceOrigin, accessToken: token.access_token };
+}
+
+async function querySalesforce(
+  { instanceOrigin, accessToken }: Awaited<ReturnType<typeof getSalesforceConnection>>,
+  query: string,
+): Promise<unknown[]> {
   const queryUrl = new URL("/services/data/v66.0/query", instanceOrigin);
-  queryUrl.searchParams.set("q", "SELECT Id, Name, Company, Email, Status FROM Lead ORDER BY CreatedDate DESC, Id DESC LIMIT 20");
+  queryUrl.searchParams.set("q", query);
   const response = await salesforceFetch(queryUrl, {
     method: "GET",
-    headers: { Authorization: `Bearer ${token.access_token}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
   });
 
   if (!response.ok) {
@@ -118,15 +124,84 @@ export async function getSalesforceLeads(): Promise<Lead[]> {
     throw new SalesforceError("Salesforce returned an invalid Leads response.");
   }
 
-  return result.records.slice(0, 20).map((record: unknown) => {
-    if (
-      !isObject(record) || typeof record.Id !== "string" ||
-      typeof record.Name !== "string" || typeof record.Company !== "string" ||
-      typeof record.Status !== "string" ||
-      (record.Email !== null && typeof record.Email !== "string")
-    ) {
-      throw new SalesforceError("Salesforce returned unexpected Lead fields. Check field access for the Run As user.");
+  return result.records;
+}
+
+const leadFields = "Id, Name, Company, Email, Status";
+const leadIdPattern = /^00Q[A-Za-z0-9]{12}(?:[A-Za-z0-9]{3})?$/;
+const cursorPattern = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)\|(00Q[A-Za-z0-9]{15})$/;
+
+function toLead(record: unknown): Lead {
+  if (
+    !isObject(record) || typeof record.Id !== "string" ||
+    typeof record.Name !== "string" || typeof record.Company !== "string" ||
+    typeof record.Status !== "string" ||
+    (record.Email !== null && typeof record.Email !== "string")
+  ) {
+    throw new SalesforceError("Salesforce returned unexpected Lead fields. Check field access for the Run As user.");
+  }
+  return { id: record.Id, name: record.Name, company: record.Company, email: record.Email, status: record.Status };
+}
+
+function escapeSoql(value: string) {
+  return value.replace(/[\\']/g, "\\$&");
+}
+
+export async function getSalesforceLeads({ search, status, cursor }: {
+  search: string;
+  status: string;
+  cursor: string | null;
+}): Promise<LeadsPage> {
+  if ([search, status].some((value) => value.length > LEAD_FILTER_MAX_LENGTH || /[\x00-\x1f\x7f]/.test(value))) {
+    throw new SalesforceError("Search and status must be valid single-line values.", 400);
+  }
+
+  const conditions: string[] = [];
+  if (search) {
+    const pattern = `'%${escapeSoql(search).replace(/[%_]/g, "\\$&")}%'`;
+    conditions.push(`(Name LIKE ${pattern} OR Company LIKE ${pattern} OR Email LIKE ${pattern})`);
+  }
+  if (status) conditions.push(`Status = '${escapeSoql(status)}'`);
+  if (cursor !== null) {
+    const match = cursorPattern.exec(cursor);
+    if (!match || match[0] !== cursor || !Number.isFinite(Date.parse(match[1]))) {
+      throw new SalesforceError("Invalid lead page cursor. Refresh the results and try again.", 400);
     }
-    return { id: record.Id, name: record.Name, company: record.Company, email: record.Email, status: record.Status };
+    const [, createdDate, id] = match;
+    conditions.push(`(CreatedDate < ${createdDate} OR (CreatedDate = ${createdDate} AND Id < '${id}'))`);
+  }
+
+  const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+  const connection = await getSalesforceConnection();
+  const [records, statusRecords] = await Promise.all([
+    querySalesforce(connection, `SELECT ${leadFields}, CreatedDate FROM Lead${where} ORDER BY CreatedDate DESC, Id DESC LIMIT ${LEADS_PAGE_SIZE + 1}`),
+    cursor === null
+      ? querySalesforce(connection, "SELECT Status FROM Lead GROUP BY Status ORDER BY Status")
+      : Promise.resolve(null),
+  ]);
+
+  const leads = records.slice(0, LEADS_PAGE_SIZE).map(toLead);
+  let nextCursor: string | null = null;
+  if (records.length > LEADS_PAGE_SIZE) {
+    const last = records[LEADS_PAGE_SIZE - 1];
+    const createdDate = isObject(last) && typeof last.CreatedDate === "string" ? Date.parse(last.CreatedDate) : NaN;
+    if (!Number.isFinite(createdDate)) throw new SalesforceError("Salesforce returned an invalid Lead creation date.");
+    nextCursor = `${new Date(createdDate).toISOString().replace(".000Z", "Z")}|${leads[LEADS_PAGE_SIZE - 1].id}`;
+    if (!cursorPattern.test(nextCursor)) throw new SalesforceError("Salesforce returned an invalid Lead page cursor.");
+  }
+
+  const statuses = statusRecords?.map((record) => {
+    if (!isObject(record) || typeof record.Status !== "string") {
+      throw new SalesforceError("Salesforce returned an invalid Lead status.");
+    }
+    return record.Status;
   });
+  return { leads, nextCursor, statuses };
+}
+
+export async function getSalesforceLead(leadId: string): Promise<Lead | null> {
+  if (!leadIdPattern.test(leadId) || /\s/.test(leadId)) throw new SalesforceError("Invalid Lead ID.", 400);
+  const connection = await getSalesforceConnection();
+  const [record] = await querySalesforce(connection, `SELECT ${leadFields} FROM Lead WHERE Id = '${leadId}' LIMIT 1`);
+  return record === undefined ? null : toLead(record);
 }

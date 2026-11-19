@@ -6,4 +6,13 @@ export type Lead = {
   status: string;
 };
 
-export type LeadsResponse = { leads: Lead[] } | { error: string };
+export const LEADS_PAGE_SIZE = 20;
+export const LEAD_FILTER_MAX_LENGTH = 120;
+
+export type LeadsPage = {
+  leads: Lead[];
+  nextCursor: string | null;
+  statuses?: string[];
+};
+
+export type LeadsResponse = LeadsPage | { error: string };

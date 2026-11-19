@@ -1,7 +1,7 @@
 // Lets approved users send a Slack notification for a Salesforce lead.
 
 import { getLeadHubAccessStatus } from "@/src/lib/authorization";
-import { getSalesforceLeads, SalesforceError } from "@/lib/salesforce";
+import { getSalesforceLead, SalesforceError } from "@/lib/salesforce";
 import { notifySlack, SlackError } from "@/lib/slack";
 
 export async function POST(request: Request) {
@@ -38,10 +38,9 @@ export async function POST(request: Request) {
 
   try {
     // Resolve current Lead fields on the server instead of trusting browser content.
-    const leads = await getSalesforceLeads();
-    const lead = leads.find((record) => record.id === body.leadId);
+    const lead = await getSalesforceLead(body.leadId);
     if (!lead) {
-      return Response.json({ error: "Lead is no longer in the latest results. Refresh the dashboard and try again." }, { status: 404, headers });
+      return Response.json({ error: "Lead is no longer visible in Salesforce. Refresh the dashboard and try again." }, { status: 404, headers });
     }
     await notifySlack(lead);
     return Response.json({ success: true }, { headers });
