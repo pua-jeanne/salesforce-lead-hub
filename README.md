@@ -65,7 +65,7 @@ or secrets and stores no data. If Clerk signs in but Convex does not authenticat
 check that the issuer matches the Clerk instance, the Clerk Convex integration is
 active, the backend configuration has synced, and the frontend points at that backend.
 
-Checks: `npm run lint`, `npx tsc --noEmit`, and `npm run build`. If Turbopack cannot
+Checks: `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`. If Turbopack cannot
 create its worker process in a restricted environment, try
 `npm run build -- --webpack`. The existing Google fonts require network access.
 
@@ -117,3 +117,14 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Pull request checks
+
+The GitHub Actions **CI** workflow runs on pull requests targeting `main` and
+pushes to `main`. It uses Node.js 24 and runs `npm ci`, `npm run lint`,
+`npm run typecheck`, and `npm test`. The tests use mocks and an in-process
+Convex backend, so CI needs no application credentials.
+
+To block merges until CI passes, require the **Lint, typecheck, and test**
+status check in the GitHub ruleset or branch protection rule for `main` after
+the workflow has run. Vercel handles Preview and Production deployments.

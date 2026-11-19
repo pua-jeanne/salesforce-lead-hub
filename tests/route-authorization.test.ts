@@ -23,10 +23,10 @@ const lead = { id: "00Q000000000001EAA" };
 const page = { leads: [lead], nextCursor: null };
 const getLeads = (query = "") => GET(new Request(`https://example.com/api/leads${query}`));
 
-function notify() {
+function notify(origin?: string) {
   return POST(new Request("https://example.com/api/slack/notify", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(origin ? { Origin: origin } : {}) },
     body: JSON.stringify({ leadId: lead.id }),
   }));
 }
@@ -89,7 +89,6 @@ describe.each([["leads", getLeads], ["Slack notification", notify]] as const)("%
     expect(getSalesforceLead).not.toHaveBeenCalled();
     expect(notifySlack).not.toHaveBeenCalled();
   });
-
 });
 
 it("sends Slack the lead loaded from Salesforce for an approved user", async () => {
@@ -103,4 +102,18 @@ it("returns the Salesforce leads to an approved user", async () => {
   expect(response.status).toBe(200);
   await expect(response.json()).resolves.toEqual(page);
   expect(getSalesforceLeads).toHaveBeenCalledExactlyOnceWith({ search: "Acme", status: "New", cursor: "next" });
+});
+
+
+it("rejects cross-origin Slack notifications before contacting Salesforce or Slack", async () => {
+  expect((await notify("https://other.example")).status).toBe(403);
+  expect(getSalesforceLead).not.toHaveBeenCalled();
+  expect(notifySlack).not.toHaveBeenCalled();
+});
+
+it("returns 404 without posting when Salesforce no longer returns the lead", async () => {
+  getSalesforceLead.mockResolvedValue(null);
+
+  expect((await notify()).status).toBe(404);
+  expect(notifySlack).not.toHaveBeenCalled();
 });
