@@ -7,18 +7,21 @@ import Home from "../app/page";
 import { GET } from "../app/api/leads/route";
 import { POST } from "../app/api/slack/notify/route";
 
-const { auth, getSalesforceLeads, notifySlack } = vi.hoisted(() => ({
+const { auth, getSalesforceLeads, getSalesforceLead, notifySlack } = vi.hoisted(() => ({
   auth: vi.fn(),
   getSalesforceLeads: vi.fn(),
+  getSalesforceLead: vi.fn(),
   notifySlack: vi.fn(),
 }));
 vi.mock("@clerk/nextjs/server", () => ({ auth }));
 vi.mock("@clerk/nextjs", () => ({ UserButton: () => null }));
 vi.mock("../app/components/lead-dashboard", () => ({ default: () => "Lead Dashboard" }));
-vi.mock("@/lib/salesforce", () => ({ getSalesforceLeads }));
+vi.mock("@/lib/salesforce", () => ({ getSalesforceLeads, getSalesforceLead }));
 vi.mock("@/lib/slack", () => ({ notifySlack }));
 
 const lead = { id: "00Q000000000001EAA" };
+const page = { leads: [lead], nextCursor: null };
+const getLeads = (query = "") => GET(new Request(`https://example.com/api/leads${query}`));
 
 function notify() {
   return POST(new Request("https://example.com/api/slack/notify", {
@@ -31,7 +34,8 @@ function notify() {
 beforeEach(() => {
   vi.resetAllMocks();
   auth.mockResolvedValue({ isAuthenticated: true, userId: "user_approved" });
-  getSalesforceLeads.mockResolvedValue([lead]);
+  getSalesforceLeads.mockResolvedValue(page);
+  getSalesforceLead.mockResolvedValue(lead);
   vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", " user_other, , user_approved ");
 });
 
@@ -59,11 +63,12 @@ describe("dashboard", () => {
   });
 });
 
-describe.each([["leads", GET], ["Slack notification", notify]] as const)("%s route", (_, request) => {
+describe.each([["leads", getLeads], ["Slack notification", notify]] as const)("%s route", (_, request) => {
   it("returns 401 for signed-out requests before calling external services", async () => {
     auth.mockResolvedValue({ isAuthenticated: false, userId: null });
     expect((await request()).status).toBe(401);
     expect(getSalesforceLeads).not.toHaveBeenCalled();
+    expect(getSalesforceLead).not.toHaveBeenCalled();
     expect(notifySlack).not.toHaveBeenCalled();
   });
 
@@ -73,6 +78,7 @@ describe.each([["leads", GET], ["Slack notification", notify]] as const)("%s rou
     expect(response.status).toBe(403);
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(getSalesforceLeads).not.toHaveBeenCalled();
+    expect(getSalesforceLead).not.toHaveBeenCalled();
     expect(notifySlack).not.toHaveBeenCalled();
   });
 
@@ -80,22 +86,21 @@ describe.each([["leads", GET], ["Slack notification", notify]] as const)("%s rou
     vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", value);
     expect((await request()).status).toBe(403);
     expect(getSalesforceLeads).not.toHaveBeenCalled();
+    expect(getSalesforceLead).not.toHaveBeenCalled();
     expect(notifySlack).not.toHaveBeenCalled();
   });
 
-  it("allows approved users to reach the existing Salesforce flow", async () => {
-    expect((await request()).status).toBe(200);
-    expect(getSalesforceLeads).toHaveBeenCalledOnce();
-  });
 });
 
 it("sends Slack the lead loaded from Salesforce for an approved user", async () => {
   expect((await notify()).status).toBe(200);
+  expect(getSalesforceLead).toHaveBeenCalledExactlyOnceWith(lead.id);
   expect(notifySlack).toHaveBeenCalledExactlyOnceWith(lead);
 });
 
 it("returns the Salesforce leads to an approved user", async () => {
-  const response = await GET();
+  const response = await getLeads("?search=Acme&status=New&cursor=next");
   expect(response.status).toBe(200);
-  await expect(response.json()).resolves.toEqual({ leads: [lead] });
+  await expect(response.json()).resolves.toEqual(page);
+  expect(getSalesforceLeads).toHaveBeenCalledExactlyOnceWith({ search: "Acme", status: "New", cursor: "next" });
 });

@@ -17,7 +17,7 @@ Salesforce Lead Hub gives authenticated users a workspace for viewing Salesforce
 The architecture supports four core capabilities.
 
 - Authenticate application users through Clerk.
-- Retrieve up to 20 Salesforce Leads using the configured integration user's permissions.
+- Retrieve Salesforce Leads in pages of 20 using the configured integration user's permissions.
 - Persist private notes in Convex with ownership enforced on the backend.
 - Send user-triggered notifications to a configured Slack channel.
 
@@ -195,7 +195,7 @@ sequenceDiagram
     UI->>UI: Show Sent to Slack
 ```
 
-The Slack route resolves current Lead content on the server. The selected record must remain in the latest 20 results. Slack delivery is a separate external operation from Convex notes and Salesforce reads.
+The Slack route resolves current Lead content on the server. The selected record must remain visible to the Salesforce integration user. Slack delivery is a separate external operation from Convex notes and Salesforce reads.
 
 ## 5. Architectural decisions and consequences
 
@@ -317,27 +317,29 @@ Convex stores notes and their owner/Lead metadata. Salesforce integration creden
 
 ### OAuth and Lead retrieval
 
-[lib/salesforce.ts](../lib/salesforce.ts) is marked `server-only` and exports `getSalesforceLeads` and `SalesforceError`.
+[lib/salesforce.ts](../lib/salesforce.ts) is marked `server-only` and exports `getSalesforceLeads`, `getSalesforceLead`, and `SalesforceError`.
 
 1. Read `SALESFORCE_LOGIN_URL`, `SALESFORCE_CLIENT_ID`, and `SALESFORCE_CLIENT_SECRET` from server environment variables.
 2. Validate the login URL as an HTTPS origin under `.salesforce.com` with no path, query, credentials, or custom port.
 3. POST a URL-encoded `client_credentials` grant to `/services/oauth2/token` on that origin.
 4. Read `access_token` and `instance_url` from the response and validate the returned instance origin.
-5. Issue the fixed SOQL query against `/services/data/v66.0/query` on that returned instance, using the token as a bearer credential.
+5. Issue a bounded SOQL query against `/services/data/v66.0/query` on that returned instance, using the token as a bearer credential.
 6. Validate and map the returned fields to the shared `Lead` type.
 
 ```sql
-SELECT Id, Name, Company, Email, Status
+SELECT Id, Name, Company, Email, Status, CreatedDate
 FROM Lead
 ORDER BY CreatedDate DESC, Id DESC
-LIMIT 20
+LIMIT 21
 ```
+
+The query fetches one extra record to detect another page. Search and status filters apply in Salesforce before the page limit. The next page starts after the last displayed creation date and ID.
 
 Every invocation obtains a fresh token. Requests use `cache: "no-store"`, reject redirects, and have a 15-second timeout per request. The token exchange and query each have their own timeout.
 
 ### GET /api/leads
 
-[app/api/leads/route.ts](../app/api/leads/route.ts) authenticates with Clerk and invokes `getSalesforceLeads()`.
+[app/api/leads/route.ts](../app/api/leads/route.ts) authenticates with Clerk and checks the approved-user allowlist. It accepts optional `search`, `status`, and `cursor` query parameters. Send the same filters when requesting the next page.
 
 Successful responses have the following structure.
 
@@ -351,11 +353,13 @@ Successful responses have the following structure.
       "email": null,
       "status": "Open - Not Contacted"
     }
-  ]
+  ],
+  "nextCursor": null,
+  "statuses": ["Open - Not Contacted"]
 }
 ```
 
-The example is illustrative. Error responses have `{ "error": "..." }`. All handler-generated responses set `Cache-Control: private, no-store`.
+A null `nextCursor` means there are no more results. The first page includes `statuses` from the visible Salesforce leads. Error responses have `{ "error": "..." }`. All handler-generated responses set `Cache-Control: private, no-store`.
 
 | HTTP status | Meaning in this endpoint |
 | --- | --- |
@@ -379,7 +383,7 @@ Salesforce `401`, `403`, and `429` responses become safe explanatory messages wi
 2. If an Origin header is present, require it to match the request URL origin.
 3. Require an `application/json` content type and parse the body.
 4. Validate `leadId` as a Salesforce Lead ID.
-5. Fetch the current latest 20 Leads through the server Salesforce helper and locate that ID.
+5. Fetch the requested Lead by ID through the server Salesforce helper.
 6. Send the server-resolved fields to the configured Slack webhook.
 7. Return `{ "success": true }` when Slack confirms delivery.
 
@@ -423,7 +427,7 @@ Runtime authentication and external-service responses determine feature availabi
 
 ## 12. Constraints and known limitations
 
-- The latest 20 Salesforce records form the dashboard's working set. Search, filters, and summary counts operate on that batch.
+- The dashboard starts with 20 Salesforce records and can load more. Search and filters run in Salesforce. Summary counts reflect the loaded rows.
 - All signed-in app users share the Run As user's Salesforce view and the configured Slack destination.
 - Notes use a syntactically validated Salesforce ID as a reference. They can remain in Convex after the corresponding Salesforce Lead is deleted or becomes unavailable.
 - Concurrent edits to one note apply in transaction order. The UI has no version-conflict prompt, and deletion is permanent through the current API.
@@ -595,7 +599,7 @@ Paths in this document are relative to the repository root.
 - Open `LeadNotes` with the selected Lead object and pass the actual record ID to `NotifySlackButton`.
 - Render Clerk's `UserButton` for account controls and sign-out.
 
-Search and filtering apply to the latest batch of up to 20 Leads. The dashboard fetches again after a refresh or retry. Notes subscriptions update reactively through Convex.
+Applying a search or status filter restarts pagination. Load more appends the next page of matching leads. Notes subscriptions update reactively through Convex.
 
 ### Notes UI
 

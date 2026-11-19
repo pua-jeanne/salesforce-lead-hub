@@ -3,7 +3,7 @@
 import { UserButton } from "@clerk/nextjs";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import type { Lead, LeadsResponse } from "@/lib/leads";
+import { LEAD_FILTER_MAX_LENGTH, LEADS_PAGE_SIZE, type Lead, type LeadsResponse } from "@/lib/leads";
 import LeadNotes from "./lead-notes";
 import NotifySlackButton from "./notify-slack-button";
 
@@ -18,22 +18,55 @@ export default function LeadDashboard() {
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; restart?: boolean } | null>(null);
   const [attempt, setAttempt] = useState(0);
+
+  const [search, setSearch] = useState("");
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("");
+  const [statuses, setStatuses] = useState<string[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+
+  function applyFilters(nextQuery: string, nextStatus: string) {
+    setQuery(nextQuery);
+    setStatus(nextStatus);
+    setCursor(null);
+    setNextCursor(null);
+    setLeads([]);
+    setError(null);
+    setLoading(true);
+    setAttempt((value) => value + 1);
+  }
 
   useEffect(() => {
     const controller = new AbortController();
     async function loadLeads() {
       try {
-        const response = await fetch("/api/leads", { cache: "no-store", signal: controller.signal });
+        const params = new URLSearchParams({ search: query, status });
+        if (cursor) params.set("cursor", cursor);
+        const response = await fetch(`/api/leads?${params}`, { cache: "no-store", signal: controller.signal });
         const data: LeadsResponse = await response.json();
+        if (controller.signal.aborted) return;
         if (!response.ok || "error" in data) {
-          throw new Error("error" in data ? data.error : "Unable to load Salesforce Leads.");
+          setError({
+            message: "error" in data ? data.error : "Unable to load Salesforce Leads.",
+            restart: cursor !== null && response.status === 400,
+          });
+          return;
         }
-        if (!controller.signal.aborted) setLeads(data.leads);
+        setLeads((current) => {
+          const uniqueLeads = new Map((cursor ? current : []).map((lead) => [lead.id, lead]));
+          for (const lead of data.leads) {
+            if (!uniqueLeads.has(lead.id)) uniqueLeads.set(lead.id, lead);
+          }
+          return [...uniqueLeads.values()];
+        });
+        setNextCursor(data.nextCursor);
+        if (data.statuses) setStatuses(data.statuses);
       } catch (failure) {
         if (!controller.signal.aborted) {
-          setError(failure instanceof Error ? failure.message : "Unable to load Salesforce Leads. Please try again.");
+          setError({ message: failure instanceof Error ? failure.message : "Unable to load Salesforce Leads. Please try again." });
         }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -41,18 +74,11 @@ export default function LeadDashboard() {
     }
     void loadLeads();
     return () => controller.abort();
-  }, [attempt]);
+  }, [attempt, cursor, query, status]);
 
   const leadStatuses = [...new Set(leads.map((lead) => lead.status))].sort();
-  const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("All statuses");
-  const query = search.trim().toLowerCase();
-  const visibleLeads = leads.filter((lead) =>
-    (status === "All statuses" || lead.status === status) &&
-    [lead.name, lead.company, lead.email].some((value) => (value ?? "").toLowerCase().includes(query)),
-  );
   const stats = [
-    { label: "Loaded leads", value: leads.length, detail: "Latest 20 leads at most", color: "bg-indigo-500" },
+    { label: "Loaded leads", value: leads.length, detail: "Within current results", color: "bg-indigo-500" },
     ...leadStatuses.slice(0, 3).map((value) => ({
       label: value,
       value: leads.filter((lead) => lead.status === value).length,
@@ -84,7 +110,7 @@ export default function LeadDashboard() {
             <p className="mt-3 text-sm leading-6 text-slate-500 sm:text-base">Keep your pipeline in focus, one conversation at a time.</p>
           </div>
           <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600">
-            <span aria-hidden="true" className="size-2 rounded-full bg-amber-400" /> {loading ? "Loading Salesforce…" : error ? "Salesforce unavailable" : "Salesforce"}
+            <span aria-hidden="true" className="size-2 rounded-full bg-amber-400" /> {loading ? "Loading Salesforce…" : error ? "Lead request failed" : "Salesforce"}
           </span>
         </section>
 
@@ -95,7 +121,7 @@ export default function LeadDashboard() {
                 <h2 className="text-sm font-medium text-slate-500">{stat.label}</h2>
                 <span aria-hidden="true" className={`size-2 rounded-full ${stat.color}`} />
               </div>
-              <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums">{loading || error ? "—" : stat.value}</p>
+              <p className="mt-4 text-3xl font-semibold tracking-tight tabular-nums">{!cursor && (loading || error) ? "—" : stat.value}</p>
               <p className="mt-2 text-xs text-slate-500">{stat.detail}</p>
             </article>
           ))}
@@ -105,31 +131,39 @@ export default function LeadDashboard() {
           <div className="flex flex-col justify-between gap-5 border-b border-slate-200 p-5 sm:p-6 lg:flex-row lg:items-center">
             <div>
               <h2 id="leads-heading" className="text-lg font-semibold">Latest leads <span className="ml-2 rounded-md bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">{leads.length}</span></h2>
-              <p className="mt-1 text-sm text-slate-500">The 20 most recently created leads visible to the integration user.</p>
+              <p className="mt-1 text-sm text-slate-500">Leads visible to the integration user, newest first, {LEADS_PAGE_SIZE} per page.</p>
             </div>
-            <div className="flex flex-col gap-3 sm:flex-row">
+            <form className="flex flex-wrap items-center gap-3" onSubmit={(event) => {
+              event.preventDefault();
+              applyFilters(search.trim(), status);
+            }}>
               <div>
                 <label htmlFor="lead-search" className="sr-only">Search by name, company, or email</label>
-                <input id="lead-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search leads…" className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 sm:w-60" />
+                <input id="lead-search" type="search" maxLength={LEAD_FILTER_MAX_LENGTH} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search leads…" className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 sm:w-60" />
               </div>
               <div>
                 <label htmlFor="lead-status" className="sr-only">Filter by status</label>
-                <select id="lead-status" value={status} onChange={(event) => setStatus(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
-                  <option>All statuses</option>
-                  {leadStatuses.map((value) => <option key={value}>{value}</option>)}
+                <select id="lead-status" value={status} onChange={(event) => applyFilters(search.trim(), event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100">
+                  <option value="">All statuses</option>
+                  {statuses.map((value) => <option key={value}>{value}</option>)}
                 </select>
               </div>
-            </div>
+              <button type="submit" className="rounded-lg border border-indigo-200 px-3 py-2.5 text-sm font-medium text-indigo-700 hover:bg-indigo-50">Search</button>
+            </form>
           </div>
-          {loading && <p role="status" className="px-6 py-8 text-sm text-slate-600">Loading Salesforce Leads…</p>}
+          {loading && !cursor && <p role="status" className="px-6 py-8 text-sm text-slate-600">Loading Salesforce Leads…</p>}
           {error && (
             <div role="alert" className="space-y-3 border-b border-red-100 bg-red-50 px-6 py-5 text-sm text-red-800">
-              <p>{error}</p>
+              <p>{error.message}</p>
               <button type="button" onClick={() => {
+                if (error.restart) {
+                  applyFilters(query, status);
+                  return;
+                }
                 setError(null);
                 setLoading(true);
                 setAttempt((value) => value + 1);
-              }} className="rounded-lg border border-red-200 px-3 py-2 font-medium focus-visible:outline-2">Retry</button>
+              }} className="rounded-lg border border-red-200 px-3 py-2 font-medium focus-visible:outline-2">{error.restart ? "Reload results" : "Retry"}</button>
             </div>
           )}
           <div
@@ -144,7 +178,7 @@ export default function LeadDashboard() {
                 <tr>{["Name", "Company", "Email", "Status", "Actions"].map((heading) => <th key={heading} scope="col" className="px-6 py-4 font-medium">{heading}</th>)}</tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {visibleLeads.map((lead) => (
+                {leads.map((lead) => (
                   <tr key={lead.id} className="transition-colors hover:bg-slate-50/80">
                     <th scope="row" className="whitespace-nowrap px-6 py-5 font-medium">
                       <span className="flex items-center gap-3"><span aria-hidden="true" className="flex size-9 shrink-0 items-center justify-center rounded-full bg-indigo-50 text-xs font-semibold text-indigo-600">{lead.name.split(" ").map((part) => part[0]).join("")}</span>{lead.name}</span>
@@ -167,12 +201,20 @@ export default function LeadDashboard() {
                     </td>
                   </tr>
                 ))}
-                {!loading && !error && visibleLeads.length === 0 && <tr><td colSpan={5} className="px-6 py-16 text-center"><p className="font-medium">No leads found</p><p className="mt-2 text-slate-500">{leads.length === 0 ? "Salesforce returned no visible Leads." : "Try another name, company, or status."}</p><button type="button" onClick={() => { setSearch(""); setStatus("All statuses"); }} className="mt-4 rounded-lg px-3 py-2 font-medium text-indigo-600 hover:bg-indigo-50 focus-visible:outline-2 focus-visible:outline-indigo-600">Clear filters</button></td></tr>}
+                {!loading && !error && leads.length === 0 && <tr><td colSpan={5} className="px-6 py-16 text-center"><p className="font-medium">No leads found</p><p className="mt-2 text-slate-500">{query || status ? "Try another name, company, email, or status." : "Salesforce returned no visible leads."}</p><button type="button" onClick={() => { setSearch(""); applyFilters("", ""); }} className="mt-4 rounded-lg px-3 py-2 font-medium text-indigo-600 hover:bg-indigo-50 focus-visible:outline-2 focus-visible:outline-indigo-600">Clear filters</button></td></tr>}
               </tbody>
             </table>
           </div>
           <div className="flex flex-wrap justify-between gap-2 border-t border-slate-200 bg-slate-50/50 px-6 py-4 text-xs text-slate-500">
-            <p role="status">{loading ? "Loading leads…" : error ? "Leads unavailable" : `Showing ${visibleLeads.length} of ${leads.length} loaded leads`}</p>
+            <p role="status">{loading ? "Loading leads…" : error && !cursor ? "Leads unavailable" : `${leads.length} leads loaded`}</p>
+            {nextCursor && !error && (
+              <button type="button" disabled={loading} onClick={() => {
+                setLoading(true);
+                setCursor(nextCursor);
+              }} className="rounded-lg border border-slate-300 px-3 py-2 font-medium text-slate-700 disabled:opacity-50">
+                {loading ? "Loading…" : "Load More"}
+              </button>
+            )}
             <p>Salesforce · Read-only</p>
           </div>
         </section>
