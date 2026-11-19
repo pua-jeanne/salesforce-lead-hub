@@ -83,7 +83,9 @@ describe("lead notes", () => {
     const owner = t.withIdentity(alice);
     const stranger = t.withIdentity(bob);
     const noteId = await owner.mutation(api.leadNotes.create, { salesforceLeadId: leadId, content: "Private note" });
-    expect((await stranger.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts })).page).toEqual([]);
+    const bobsNote = await stranger.mutation(api.leadNotes.create, { salesforceLeadId: leadId, content: "Bob's note" });
+    const bobsPage = await stranger.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts });
+    expect(bobsPage.page.map((note) => note._id)).toEqual([bobsNote]);
     await expect(stranger.mutation(api.leadNotes.update, { noteId, content: "Stolen" })).rejects.toThrow("Note not found or access denied");
     await expect(stranger.mutation(api.leadNotes.remove, { noteId })).rejects.toThrow("Note not found or access denied");
 
@@ -91,7 +93,8 @@ describe("lead notes", () => {
     expect((await differentIssuer.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts })).page).toEqual([]);
     await expect(differentIssuer.mutation(api.leadNotes.update, { noteId, content: "Stolen" })).rejects.toThrow("Note not found or access denied");
     await expect(differentIssuer.mutation(api.leadNotes.remove, { noteId })).rejects.toThrow("Note not found or access denied");
-    expect((await owner.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts })).page[0].content).toBe("Private note");
+    const alicesPage = await owner.query(api.leadNotes.list, { salesforceLeadId: leadId, paginationOpts });
+    expect(alicesPage.page).toEqual([expect.objectContaining({ _id: noteId, content: "Private note" })]);
   });
 
   it("rejects unauthenticated reads and every write", async () => {

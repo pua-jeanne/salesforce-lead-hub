@@ -1,8 +1,15 @@
 // @vitest-environment node
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { GET } from "../app/api/leads/route";
+import type { LeadsPage } from "../lib/leads";
 import { getSalesforceLeads } from "../lib/salesforce";
 
 vi.mock("server-only", () => ({}));
+vi.mock("@clerk/nextjs/server", () => ({
+  auth: async () => ({ isAuthenticated: true, userId: "user_approved" }),
+}));
+
+const leadsUrl = "https://example.test/api/leads";
 
 const fetchMock = vi.fn<typeof fetch>();
 const records = Array.from({ length: 21 }, (_, index) => ({
@@ -21,6 +28,7 @@ function soql(call: number) {
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
+  vi.stubEnv("AUTHORIZED_CLERK_USER_IDS", "user_approved");
   vi.stubEnv("SALESFORCE_LOGIN_URL", "https://example.salesforce.com");
   vi.stubEnv("SALESFORCE_CLIENT_ID", "mock-client");
   vi.stubEnv("SALESFORCE_CLIENT_SECRET", "mock-secret");
@@ -43,15 +51,21 @@ it("uses a lookahead row and resumes after the last displayed lead, including ti
   fetchMock
     .mockResolvedValueOnce(Response.json({ records }))
     .mockResolvedValueOnce(Response.json({ records: [{ Status: "New" }, { Status: "Working" }] }));
-  const filters = { search: "Acme", status: "New" };
-  const first = await getSalesforceLeads({ ...filters, cursor: null });
+  const params = new URLSearchParams({ search: "Acme", status: "New" });
+  const firstResponse = await GET(new Request(`${leadsUrl}?${params}`));
+  expect(firstResponse.status).toBe(200);
+  const first: LeadsPage = await firstResponse.json();
+  expect(first.nextCursor).toBeTruthy();
   expect(first.leads.map((lead) => lead.id)).toEqual(records.slice(0, 20).map((record) => record.Id));
   expect(first.statuses).toEqual(["New", "Working"]);
   expect(soql(1)).toContain("ORDER BY CreatedDate DESC, Id DESC LIMIT 21");
 
   mockToken();
   fetchMock.mockResolvedValueOnce(Response.json({ records: records.slice(20) }));
-  const second = await getSalesforceLeads({ ...filters, cursor: first.nextCursor });
+  params.set("cursor", first.nextCursor!);
+  const secondResponse = await GET(new Request(`${leadsUrl}?${params}`));
+  expect(secondResponse.status).toBe(200);
+  const second: LeadsPage = await secondResponse.json();
   expect(soql(4)).toContain("AND (CreatedDate < 2026-11-19T00:00:00Z OR (CreatedDate = 2026-11-19T00:00:00Z AND Id < '" + records[19].Id + "'))");
   expect(soql(4)).toContain("Company LIKE '%Acme%'");
   expect(soql(4)).toContain("Status = 'New'");
@@ -77,3 +91,28 @@ it.each(["invalid", "https://example.salesforce.com/services/data/v66.0/query/lo
     expect(fetchMock).not.toHaveBeenCalled();
   },
 );
+
+
+it("returns a private 400 response without calling Salesforce when the page cursor is invalid", async () => {
+  const response = await GET(new Request(`${leadsUrl}?cursor=invalid`));
+
+  expect(response.status).toBe(400);
+  expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+  await expect(response.json()).resolves.toEqual({
+    error: "Invalid lead page cursor. Refresh the results and try again.",
+  });
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it("returns a safe error when Salesforce rate-limits a later page", async () => {
+  mockToken();
+  fetchMock.mockResolvedValueOnce(new Response("Upstream diagnostic", { status: 429 }));
+  const params = new URLSearchParams({ cursor: `2026-11-19T00:00:00Z|${records[19].Id}` });
+
+  const response = await GET(new Request(`${leadsUrl}?${params}`));
+
+  expect(response.status).toBe(502);
+  await expect(response.json()).resolves.toEqual({
+    error: "Salesforce's request limit was reached. Please try again later.",
+  });
+});
