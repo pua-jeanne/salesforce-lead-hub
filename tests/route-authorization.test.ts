@@ -2,6 +2,8 @@
 
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import Home from "../app/page";
 import { GET } from "../app/api/leads/route";
 import { POST } from "../app/api/slack/notify/route";
 
@@ -11,6 +13,8 @@ const { auth, getSalesforceLeads, notifySlack } = vi.hoisted(() => ({
   notifySlack: vi.fn(),
 }));
 vi.mock("@clerk/nextjs/server", () => ({ auth }));
+vi.mock("@clerk/nextjs", () => ({ UserButton: () => null }));
+vi.mock("../app/components/lead-dashboard", () => ({ default: () => "Lead Dashboard" }));
 vi.mock("@/lib/salesforce", () => ({ getSalesforceLeads }));
 vi.mock("@/lib/slack", () => ({ notifySlack }));
 
@@ -32,6 +36,28 @@ beforeEach(() => {
 });
 
 afterEach(() => vi.unstubAllEnvs());
+
+describe("dashboard", () => {
+  it("redirects signed-out users to Clerk sign-in", async () => {
+    const redirectToSignIn = vi.fn(() => { throw new Error("Clerk sign-in redirect"); });
+    auth.mockResolvedValue({ isAuthenticated: false, userId: null, redirectToSignIn });
+
+    await expect(Home()).rejects.toThrow("Clerk sign-in redirect");
+    expect(redirectToSignIn).toHaveBeenCalledOnce();
+  });
+
+  it("shows Access Denied without rendering the dashboard for an unapproved user", async () => {
+    auth.mockResolvedValue({ isAuthenticated: true, userId: "user_unapproved" });
+
+    const page = renderToStaticMarkup(await Home());
+    expect(page).toContain("403 Access Denied");
+    expect(page).not.toContain("Lead Dashboard");
+  });
+
+  it("renders the dashboard for an approved user", async () => {
+    expect(renderToStaticMarkup(await Home())).toContain("Lead Dashboard");
+  });
+});
 
 describe.each([["leads", GET], ["Slack notification", notify]] as const)("%s route", (_, request) => {
   it("returns 401 for signed-out requests before calling external services", async () => {
@@ -66,4 +92,10 @@ describe.each([["leads", GET], ["Slack notification", notify]] as const)("%s rou
 it("sends Slack the lead loaded from Salesforce for an approved user", async () => {
   expect((await notify()).status).toBe(200);
   expect(notifySlack).toHaveBeenCalledExactlyOnceWith(lead);
+});
+
+it("returns the Salesforce leads to an approved user", async () => {
+  const response = await GET();
+  expect(response.status).toBe(200);
+  await expect(response.json()).resolves.toEqual({ leads: [lead] });
 });

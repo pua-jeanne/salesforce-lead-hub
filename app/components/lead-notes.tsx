@@ -9,25 +9,25 @@ import type { Doc } from "@/convex/_generated/dataModel";
 import type { Lead } from "@/lib/leads";
 import { MAX_NOTE_LENGTH } from "@/lib/note-limits";
 
-function noteError(error: unknown) {
+function noteError(error: unknown, fallback: string) {
   return error instanceof ConvexError && typeof error.data === "string"
     ? error.data
-    : "Unable to save changes. Please check your connection and try again.";
+    : fallback;
 }
 
-class NotesErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
-  state = { failed: false };
+class NotesErrorBoundary extends Component<{ children: ReactNode }, { message: string | null }> {
+  state: { message: string | null } = { message: null };
 
-  static getDerivedStateFromError() {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown) {
+    return { message: noteError(error, "Unable to load notes. Please try again.") };
   }
 
   render() {
-    if (this.state.failed) {
+    if (this.state.message !== null) {
       return (
         <div role="alert" className="space-y-3 rounded-lg bg-red-50 p-4 text-sm text-red-800">
-          <p>Unable to load notes. Check your connection and that the Convex notes functions are configured.</p>
-          <button type="button" onClick={() => this.setState({ failed: false })} className="rounded-lg border border-red-200 px-3 py-2">Retry</button>
+          <p>{this.state.message}</p>
+          <button type="button" onClick={() => this.setState({ message: null })} className="rounded-lg border border-red-200 px-3 py-2">Retry</button>
         </div>
       );
     }
@@ -59,7 +59,7 @@ function NoteForm({ initialContent = "", label, onSave, onCancel }: {
       await onSave(trimmed);
       setContent("");
     } catch (failure) {
-      setError(noteError(failure));
+      setError(noteError(failure, "Unable to save the note. Please try again."));
     } finally {
       setBusy(false);
     }
@@ -96,7 +96,7 @@ function NoteItem({ note }: { note: Doc<"leadNotes"> }) {
     try {
       await remove({ noteId: note._id });
     } catch (failure) {
-      setError(noteError(failure));
+      setError(noteError(failure, "Unable to delete the note. Please try again."));
     } finally {
       setDeleting(false);
     }
@@ -160,7 +160,7 @@ function NotesContent({ lead }: { lead: Lead }) {
 export default function LeadNotes({ lead, onClose }: { lead: Lead; onClose: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const { isAuthenticated, isLoading } = useConvexAuth();
-  const { userId } = useAuth();
+  const { isLoaded, userId } = useAuth();
 
   useEffect(() => {
     const element = dialog.current;
@@ -174,9 +174,15 @@ export default function LeadNotes({ lead, onClose }: { lead: Lead; onClose: () =
         <button type="button" onClick={onClose} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm">Close</button>
       </div>
       <p id="notes-description" className="mb-6 text-sm text-slate-500">Only you can access these notes.</p>
-      {isLoading ? <p role="status" className="text-sm">Checking authentication…</p> : isAuthenticated && userId ? (
+      {!isLoaded || isLoading ? <p role="status" className="text-sm">Checking authentication…</p> : isAuthenticated && userId ? (
         <NotesErrorBoundary key={`${userId}:${lead.id}`}><NotesContent lead={lead} /></NotesErrorBoundary>
-      ) : <p role="alert" className="text-sm text-red-700">Notes require an authenticated Convex session. Sign in again or check the Clerk + Convex configuration.</p>}
+      ) : (
+        <p role="alert" className="text-sm text-red-700">
+          {userId
+            ? "Convex could not verify your sign-in. Sign in again or contact your administrator if the issue persists."
+            : "Sign in to view and manage your notes."}
+        </p>
+      )}
     </dialog>
   );
 }
