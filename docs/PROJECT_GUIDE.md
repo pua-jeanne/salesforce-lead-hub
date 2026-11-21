@@ -5,18 +5,18 @@
 | Document attribute | Value |
 | --- | --- |
 | System | Salesforce Lead Hub |
-| Architecture baseline | Repository implementation reviewed November 13, 2026 |
+| Architecture baseline | Repository implementation reviewed November 21, 2026 |
 | Audience | Developers, technical reviewers, and assignment evaluators |
 | Scope | Application structure, integration contracts, data ownership, security, and local operation |
 | Architecture style | Single-tenant Next.js application with an authenticated Convex notes backend |
 
 ## 1. Purpose and architectural goals
 
-Salesforce Lead Hub gives authenticated users a workspace for viewing Salesforce Leads, maintaining private notes, and sending selected Lead details to Slack.
+Salesforce Lead Hub gives approved users a workspace for viewing Salesforce Leads, maintaining private notes, and sending selected Lead details to Slack.
 
 The architecture supports four core capabilities.
 
-- Authenticate application users through Clerk.
+- Authenticate users through Clerk and enforce application approval in Next.js and Convex.
 - Retrieve Salesforce Leads in pages of 20 using the configured integration user's permissions.
 - Persist private notes in Convex with ownership enforced on the backend.
 - Send user-triggered notifications to a configured Slack channel.
@@ -36,7 +36,7 @@ flowchart LR
     Hub -->|Lead notification| Slack[Slack channel]
 ```
 
-The application has one Salesforce integration identity and one Slack destination. Every signed-in Clerk user receives the Salesforce view permitted to the configured Run As user. Note ownership is scoped independently to each verified Clerk identity.
+The application has one Salesforce integration identity and one Slack destination. Every approved Clerk user receives the Salesforce view permitted to the configured Run As user. Note ownership is scoped independently to each verified Clerk identity.
 
 ## 3. Runtime containers and trust boundaries
 
@@ -83,11 +83,11 @@ flowchart TB
 
 | Boundary | Input crossing it | Enforcement |
 | --- | --- | --- |
-| Browser → Next.js page | Clerk session | `auth.protect()` before dashboard rendering |
-| Browser → Leads API | Authenticated request | Clerk server check before Salesforce access |
-| Browser → Slack API | Clerk session and Lead ID | Clerk server check, Origin check when supplied, JSON validation, and server-side Lead resolution |
-| Browser → Convex | Clerk token and function arguments | JWT issuer/audience verification, argument validators, and ownership checks |
-| Next.js → Salesforce | Integration credentials, then a bearer token | HTTPS origin validation, fixed endpoint/query, redirect rejection, and request timeouts |
+| Browser → Next.js page | Clerk session | Clerk session and approved-user checks before dashboard rendering |
+| Browser → Leads API | Authenticated request | Clerk session and approved-user checks before Salesforce access |
+| Browser → Slack API | Clerk session and Lead ID | Clerk session and approved-user checks, Origin check when supplied, JSON validation, and server-side Lead resolution |
+| Browser → Convex | Clerk token and function arguments | JWT issuer/audience verification, approved-user check, argument validators, and ownership checks |
+| Next.js → Salesforce | Integration credentials, then a bearer token | HTTPS origin validation, bounded SOQL queries, redirect rejection, and request timeouts |
 | Next.js → Slack | Lead notification payload | Validated webhook destination, redirect rejection, timeout, and delivery-response validation |
 
 ### Runtime responsibilities
@@ -105,7 +105,7 @@ flowchart TB
 
 ### 4.1 Application authentication
 
-`RootLayout` wraps the app in `ClerkProvider` and then `ConvexClientProvider`. Clerk middleware makes session information available to server requests. The homepage and API endpoints perform their own authentication checks.
+`RootLayout` wraps the app in `ClerkProvider` and then `ConvexClientProvider`. Clerk middleware makes session information available to server requests. The homepage and API endpoints check the Clerk session and approved-user list on the server.
 
 ```mermaid
 sequenceDiagram
@@ -116,11 +116,13 @@ sequenceDiagram
     participant Convex
     User->>Browser: Open dashboard
     Browser->>Next: Request homepage with session
-    Next->>Next: Clerk auth.protect()
+    Next->>Next: Verify Clerk session and approval
     alt Signed out
         Next-->>Browser: Redirect to sign-in
         Browser->>Clerk: Complete sign-in
-    else Signed in
+    else Signed in without approval
+        Next-->>Browser: Render Access Denied screen
+    else Signed in and approved
         Next-->>Browser: Render dashboard
         Browser->>Clerk: Obtain token for Convex
         Browser->>Convex: Authenticate connection with token
@@ -129,7 +131,7 @@ sequenceDiagram
     end
 ```
 
-A Clerk session enables access to the Next.js APIs. The notes UI additionally waits for Convex to confirm its token. An unreachable Convex backend can therefore leave notes waiting while Salesforce data continues to load.
+The Next.js APIs require a verified Clerk session and an approved Clerk user ID. The notes UI additionally waits for Convex to confirm its token. An unreachable Convex backend can therefore leave notes waiting while Salesforce data continues to load.
 
 ### 4.2 Salesforce Lead retrieval
 
@@ -139,17 +141,17 @@ sequenceDiagram
     participant API as GET /api/leads
     participant OAuth as Salesforce OAuth
     participant SF as Salesforce REST API
-    UI->>API: Fetch Leads
-    API->>API: Verify Clerk session
+    UI->>API: Fetch Leads with filters and optional cursor
+    API->>API: Verify Clerk session and approval
     API->>OAuth: POST client_credentials grant
     OAuth-->>API: access_token and instance_url
-    API->>SF: GET fixed SOQL query on returned instance
-    SF-->>API: Up to 20 Lead records
+    API->>SF: Query up to 21 matching records on returned instance
+    SF-->>API: Page records with one potential lookahead row
     API->>API: Validate and map fields
     API-->>UI: Private, uncached JSON response
 ```
 
-Each helper invocation obtains a fresh token. The server query sorts by `CreatedDate DESC, Id DESC` and selects `Id`, `Name`, `Company`, `Email`, and `Status`. Browser search, status filters, and summary cards operate on the loaded batch.
+Each helper invocation obtains a fresh token. The server query sorts by `CreatedDate DESC, Id DESC` and selects `Id`, `Name`, `Company`, `Email`, and `Status`. Salesforce applies search, status, and cursor filters. The dashboard summary cards count the rows currently loaded.
 
 ### 4.3 Private Lead notes
 
@@ -159,15 +161,16 @@ sequenceDiagram
     participant Convex
     participant DB as leadNotes table
     UI->>Convex: List notes for Salesforce Lead ID
-    Convex->>Convex: Read verified token identity
+    Convex->>Convex: Read verified identity and check approval
     Convex->>DB: Query ownerIdentity + salesforceLeadId index
     DB-->>Convex: Paginated owned notes
     Convex-->>UI: Reactive results
     UI->>Convex: Create note with Lead ID and content
-    Convex->>Convex: Validate input and derive owner fields
+    Convex->>Convex: Check approval, validate input, and derive owner fields
     Convex->>DB: Insert content and server timestamps
     Convex-->>UI: New note ID and subscription update
     UI->>Convex: Update or delete by note ID
+    Convex->>Convex: Check approval
     Convex->>DB: Load requested document
     Convex->>Convex: Check owner identity and Clerk subject
     Convex->>DB: Apply authorized mutation
@@ -185,10 +188,9 @@ sequenceDiagram
     participant SF as Salesforce helper
     participant Slack
     UI->>API: JSON containing leadId
-    API->>API: Verify Clerk session and validate request
-    API->>SF: Retrieve current latest Leads
-    SF-->>API: Server-resolved records
-    API->>API: Find selected Lead
+    API->>API: Verify Clerk session and approval, then validate request
+    API->>SF: Fetch the selected Lead by ID
+    SF-->>API: Server-resolved Lead
     API->>Slack: POST plain-text Block Kit fields
     Slack-->>API: HTTP success with ok body
     API-->>UI: success true
@@ -207,9 +209,9 @@ The rationale below explains the current design based on its implementation.
 | Clerk as the shared identity provider | Reuse the same account/session identity across Next.js and Convex | Convex issuer and audience configuration must match the Clerk application |
 | Convex queries and mutations for private notes | Combine persistent storage, transactions, and reactive updates | Note availability depends on the Convex connection |
 | Owner-and-Lead compound index | Scope every list query to the verified identity and selected Lead | User isolation is enforced in the query itself |
-| Salesforce client credentials with one Run As user | Support the configured server-to-server CRM integration | Signed-in users share one Salesforce permission scope |
+| Salesforce client credentials with one Run As user | Support the configured server-to-server CRM integration | Approved users share one Salesforce permission scope |
 | Server-only Salesforce and Slack helpers | Keep integration credentials within the server runtime | External calls pass through authenticated Next.js endpoints |
-| Fixed latest-20 SOQL query | Bound the dashboard working set and define predictable field access | Search and Slack selection are limited to that batch |
+| Filtered SOQL with cursor pagination | Bound each dashboard request and sort consistently by creation date and ID | Users can load more matching records in pages of 20 |
 | Fresh Salesforce token on each helper invocation | Keep token lifecycle local to each operation | Dashboard retrieval and Slack notification each perform an OAuth exchange |
 | Server-side lookup before Slack delivery | Use current Salesforce fields as the notification source | Notifications add another Salesforce read and can reject a stale selection |
 | Component-local Slack send state | Provide immediate feedback and prevent overlapping UI clicks | Reloads and separate requests can produce additional notifications |
@@ -228,12 +230,12 @@ Clerk's server and browser APIs serve different parts of the request flow.
 
 1. `ClerkProvider` supplies the browser session to Clerk components and hooks.
 2. `proxy.ts` runs `clerkMiddleware()` for application routes and API paths.
-3. `Home` calls `auth.protect()` to redirect signed-out visitors to sign-in.
-4. Both API handlers call `await auth()` and return `401` when `isAuthenticated` is false.
+3. `Home` redirects signed-out visitors to Clerk sign-in and renders an Access Denied screen for signed-in users without approval.
+4. Both API handlers use [getLeadHubAccessStatus](../src/lib/authorization.ts) and return `401` for signed-out requests or `403` when the Clerk user ID is absent from the allowlist.
 5. `ConvexProviderWithClerk` obtains a Clerk token for Convex and passes it to the Convex client.
-6. Convex verifies the token using the issuer and `convex` audience configured in `convex/auth.config.ts`.
+6. Convex verifies the token using the issuer and `convex` audience configured in `convex/auth.config.ts`. The notes functions and auth diagnostic then check the verified Clerk user ID against the backend allowlist.
 
-A working Clerk sign-in can coexist with a pending Convex connection. Salesforce API requests depend on the Clerk session, while notes additionally require Convex's verification to complete.
+A working Clerk sign-in can coexist with a pending Convex connection. Salesforce API requests require an approved Clerk session. Notes additionally require Convex to verify the token and approve the ID in its own environment.
 
 [app/convex-client-provider.tsx](../app/convex-client-provider.tsx) creates one `ConvexReactClient` from `NEXT_PUBLIC_CONVEX_URL` and connects it to Clerk's `useAuth` hook. A missing URL throws an explicit configuration error.
 
@@ -241,17 +243,17 @@ The installed Convex Clerk adapter supports the Clerk Convex integration when th
 
 ### Multiple Clerk users and shared Salesforce access
 
-Clerk can register and authenticate multiple application users. After sign-in, each user can request the shared Salesforce Lead view through the protected Next.js endpoint. Salesforce evaluates those requests using the External Client App's configured Run As identity.
+Clerk can register and authenticate multiple application users. After sign-in, an approved user can request the shared Salesforce Lead view through the protected Next.js endpoint. Salesforce evaluates those requests using the External Client App's configured Run As identity.
 
 | Concern | Identity or permission source |
 | --- | --- |
-| Who can sign in to Lead Hub | Clerk account and sign-up configuration |
-| Who can call the Salesforce Leads endpoint | A valid signed-in Clerk session |
+| Who can create an account and sign in | Clerk Invite-only admission and account settings |
+| Who can call the Salesforce Leads endpoint | A valid Clerk session and a user ID in the Next.js allowlist |
 | Which Salesforce Leads and fields can be returned | Salesforce permissions of the configured Run As user |
 | Who owns a private note | Verified Clerk identity received by Convex |
-| Who can trigger a Slack notification | A valid signed-in Clerk session, followed by server-side Lead lookup |
+| Who can trigger a Slack notification | A valid Clerk session and a user ID in the Next.js allowlist, followed by server-side Lead lookup |
 
-The current Leads endpoint authorizes every signed-in Clerk user. A person who can create an account and complete sign-in gains access to the shared Lead view. Clerk sign-up/admission settings therefore determine the audience for that Salesforce data. The application currently has no additional role or user allowlist check for Lead reads.
+Clerk invitations control account admission. Application access requires the Clerk user ID to be present in `AUTHORIZED_CLERK_USER_IDS` for the backend serving the request. A missing or blank setting grants no access.
 
 ### Why Client Credentials Flow fits this application
 
@@ -295,13 +297,13 @@ All public note functions use argument and return validators. Their implementati
 
 | Function | Arguments | Result | Access enforcement |
 | --- | --- | --- | --- |
-| `api.leadNotes.list` | `salesforceLeadId`, `paginationOpts` | Paginated owned documents | Requires verified identity and queries the owner/Lead compound index |
-| `api.leadNotes.create` | `salesforceLeadId`, `content` | New note ID | Requires verified identity and derives both owner fields from it |
-| `api.leadNotes.update` | `noteId`, `content` | `null` | Loads the document and checks both owner identity and Clerk subject before editing |
-| `api.leadNotes.remove` | `noteId` | `null` | Loads the document and checks both owner fields before deletion |
+| `api.leadNotes.list` | `salesforceLeadId`, `paginationOpts` | Paginated owned documents | Requires an approved identity and queries the owner/Lead compound index |
+| `api.leadNotes.create` | `salesforceLeadId`, `content` | New note ID | Requires an approved identity and derives both owner fields from it |
+| `api.leadNotes.update` | `noteId`, `content` | `null` | Requires approval, then loads the document and checks both owner identity and Clerk subject before editing |
+| `api.leadNotes.remove` | `noteId` | `null` | Requires approval, then loads the document and checks both owner fields before deletion |
 | `api.authTest.viewer` | None | `{ subject, issuer }` | Requires an approved Clerk identity |
 
-`requireIdentity` rejects signed-out calls. `requireOwnedNote` uses the same error for an absent note and another user's note. Clients cannot change owner fields or the Lead association through an update.
+[requireApprovedClerkIdentity](../lib/convex-authorization.ts) rejects signed-out or unapproved callers before note reads or writes. `requireOwnedNote` uses the same error for an absent note and another user's note. Clients cannot change owner fields or the Lead association through an update.
 
 Lead IDs must use the `00Q` prefix and have 15 or 18 alphanumeric characters. The dashboard supplies IDs from actual Salesforce results. Convex validates their shape and does not perform a Salesforce existence or record-permission lookup. Different textual forms of a record ID are stored as different keys.
 
@@ -333,7 +335,7 @@ ORDER BY CreatedDate DESC, Id DESC
 LIMIT 21
 ```
 
-The query fetches one extra record to detect another page. Search and status filters apply in Salesforce before the page limit. The next page starts after the last displayed creation date and ID.
+The query fetches one extra record to detect another page. Search and status filters apply in Salesforce before the page limit. The next page starts after the last displayed creation date and ID. Search matches name, company, or email. Status uses an exact match. Both filters are limited to 120 characters and reject control characters.
 
 Every invocation obtains a fresh token. Requests use `cache: "no-store"`, reject redirects, and have a 15-second timeout per request. The token exchange and query each have their own timeout.
 
@@ -359,12 +361,14 @@ Successful responses have the following structure.
 }
 ```
 
-A null `nextCursor` means there are no more results. The first page includes `statuses` from the visible Salesforce leads. Error responses have `{ "error": "..." }`. All handler-generated responses set `Cache-Control: private, no-store`.
+A null `nextCursor` means there are no more results. The first page includes `statuses` from a separate grouped query across the integration user's visible Salesforce leads. Later pages omit `statuses`. Error responses have `{ "error": "..." }`. All handler-generated responses set `Cache-Control: private, no-store`.
 
 | HTTP status | Meaning in this endpoint |
 | --- | --- |
 | `200` | Leads loaded, including an empty result set |
+| `400` | A search filter, status filter, or page cursor is invalid |
 | `401` | Application user is signed out |
+| `403` | Signed-in user is absent from the approval list |
 | `503` | Salesforce credentials are missing or login URL configuration is invalid |
 | `502` | Salesforce OAuth, query, connection, timeout, or response validation failed |
 | `500` | Unexpected server failure |
@@ -379,7 +383,7 @@ Salesforce `401`, `403`, and `429` responses become safe explanatory messages wi
 
 [app/api/slack/notify/route.ts](../app/api/slack/notify/route.ts) performs these steps.
 
-1. Require a signed-in Clerk session.
+1. Require a signed-in Clerk session and an approved user ID.
 2. If an Origin header is present, require it to match the request URL origin.
 3. Require an `application/json` content type and parse the body.
 4. Validate `leadId` as a Salesforce Lead ID.
@@ -391,7 +395,7 @@ Salesforce `401`, `403`, and `429` responses become safe explanatory messages wi
 { "leadId": "00Q000000000001EAA" }
 ```
 
-The selected Lead must still appear in the newest query results. If it has moved out of that batch, refresh the dashboard and select a current record.
+The selected Lead must still be visible to the integration user. The lookup works for leads loaded from any results page.
 
 The message includes Name, Company, Email, Status, and Salesforce Lead ID as plain-text Block Kit fields. Missing email becomes `Not provided`. Plain-text fields prevent Lead content from being interpreted as Slack mentions. Fields are capped at 2,000 characters and link/media unfurling is disabled.
 
@@ -402,8 +406,8 @@ The helper accepts HTTPS webhooks on `hooks.slack.com` with a `/services/.../...
 | `200` | Slack confirmed the notification |
 | `400` | Invalid JSON or Lead ID |
 | `401` | Application user is signed out |
-| `403` | Supplied Origin does not match the request URL |
-| `404` | Lead is absent from the latest Salesforce results |
+| `403` | Signed-in user lacks approval, or the supplied Origin does not match the request URL |
+| `404` | Lead lookup by ID returned no visible record |
 | `415` | Request content type is unsupported |
 | `429` | Slack rate-limited the request |
 | `503` | Slack or Salesforce configuration is missing or invalid |
@@ -428,7 +432,7 @@ Runtime authentication and external-service responses determine feature availabi
 ## 12. Constraints and known limitations
 
 - The dashboard starts with 20 Salesforce records and can load more. Search and filters run in Salesforce. Summary counts reflect the loaded rows.
-- All signed-in app users share the Run As user's Salesforce view and the configured Slack destination.
+- All approved app users share the Run As user's Salesforce view and the configured Slack destination.
 - Notes use a syntactically validated Salesforce ID as a reference. They can remain in Convex after the corresponding Salesforce Lead is deleted or becomes unavailable.
 - Concurrent edits to one note apply in transaction order. The UI has no version-conflict prompt, and deletion is permanent through the current API.
 - An unreachable local Convex backend can leave authentication pending until connectivity returns.
@@ -443,6 +447,7 @@ Keep values in the root `.env.local`. The following example contains placeholder
 ```dotenv
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=your_clerk_publishable_key
 CLERK_SECRET_KEY=your_clerk_secret_key
+AUTHORIZED_CLERK_USER_IDS=user_example_one,user_example_two
 NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
 NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
 
@@ -460,6 +465,7 @@ SLACK_WEBHOOK_URL=your_slack_incoming_webhook_url
 | --- | --- | --- |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk browser SDK | Browser-visible public configuration |
 | `CLERK_SECRET_KEY` | Clerk server SDK | Next.js server secret |
+| `AUTHORIZED_CLERK_USER_IDS` | Next.js and Convex approval checks | Server-side configuration, set separately in each runtime |
 | `NEXT_PUBLIC_CLERK_SIGN_IN_URL`, `NEXT_PUBLIC_CLERK_SIGN_UP_URL` | Clerk routing | Browser-visible public configuration |
 | `NEXT_PUBLIC_CONVEX_URL` | `ConvexReactClient` | Browser-visible backend address |
 | `CONVEX_DEPLOYMENT` | Convex CLI | Local development target selection |
@@ -480,6 +486,10 @@ npx convex env set CLERK_JWT_ISSUER_DOMAIN https://your-instance.clerk.accounts.
 ```
 
 The Next.js environment and Convex backend environment are separate. Setting the issuer only in Next.js `.env.local` does not configure the running Convex backend. Confirm the selected target before applying backend environment changes.
+
+### Approved-user configuration
+
+Keep Clerk registration in Invite-only mode. After a user accepts an invitation, copy their Clerk user ID from the Users page of the corresponding Clerk instance. Set the same comma-separated `AUTHORIZED_CLERK_USER_IDS` value in the Next.js server environment and in the matching Convex deployment's Environment Variables settings. Use `.env.local` for local Next.js and the applicable Vercel environment for a hosted app. Remove an ID from both settings to revoke access, then redeploy the Vercel app so it picks up the change.
 
 ### Salesforce setup
 
@@ -546,25 +556,27 @@ npm run build
 
 `npm run build` creates a local production build. `npm start` serves a successful production build. The existing `next/font/google` setup can require network access during builds. Earlier restricted build attempts encountered a Turbopack worker port-binding failure. The local production build and the Vercel-hosted build both passed on November 13, 2026.
 
+### GitHub Actions and Vercel
+
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on pull requests targeting `main` and pushes to `main`. The job uses Node.js 24 and runs `npm ci`, `npm run lint`, `npm run typecheck`, and `npm test`. The typecheck generates Next.js route types before running TypeScript. Tests use mocked services and an in-process Convex backend, so the CI job needs no app credentials.
+
+GitHub Actions validates the change. Vercel handles Preview and Production deployments separately. To gate merges on CI, configure **Lint, typecheck, and test** as a required status check for `main` after the workflow has run.
+
 ### Automated coverage
 
-[convex/leadNotes.test.ts](../convex/leadNotes.test.ts) contains five Convex tests with mocked identities.
+- [convex/leadNotes.test.ts](../convex/leadNotes.test.ts) covers the auth diagnostic, absent approval and revocation, note ownership, CRUD, input validation, and pagination.
+- [tests/route-authorization.test.ts](../tests/route-authorization.test.ts) covers homepage access, Leads and Slack API authorization, and Slack origin and record lookup checks.
+- [tests/salesforce-leads.test.ts](../tests/salesforce-leads.test.ts) covers page boundaries and tie-breaking, filter escaping, invalid cursors, and upstream failures.
 
-1. Create, read after reconnecting, update, and delete, including timestamps and per-Lead scope.
-2. Reject another user and a different issuer attempting to read, update, or delete an owner's note.
-3. Reject signed-out reads and every note mutation.
-4. Enforce Lead ID and content validation on the backend.
-5. Paginate notes while preserving user scope.
-
-These tests use `convex-test`, Vitest, and the edge runtime. The committed suite covers Convex behavior. Browser interactions and live Salesforce/Slack delivery require the manual checks below.
+Browser behavior and live integration delivery can be checked using the steps below.
 
 ### Manual checks
 
 1. While signed out, visit `/` and confirm Clerk sign-in is required. API requests to `/api/leads` should return `401`.
-2. Sign in and visit `/auth-test`. Confirm the verified Convex subject matches the Clerk user ID.
-3. Visit `/` and confirm up to 20 real Salesforce Leads load. Test search, custom status filtering, missing email display, and horizontal scrolling.
+2. With a signed-in unapproved test account, confirm the homepage shows Access Denied and both protected APIs return `403`. With an approved account, visit `/auth-test` and confirm the Convex subject matches the Clerk user ID.
+3. Visit `/` and confirm up to 20 real Salesforce Leads load. Test Load more, Salesforce search and status filtering, missing email display, and horizontal scrolling.
 4. As User A, open one Lead's notes, save a note, refresh, and reopen it. Confirm persistence, then edit the note and verify the updated timestamp.
-5. Open the same Lead in another browser profile as User B. Confirm User A's notes are absent and User B can save separate notes. Run `npm test` for direct known-ID mutation rejection checks.
+5. Open the same Lead in another browser profile as an approved User B. Confirm User A's notes are absent and User B can save separate notes. Run `npm test` for direct known-ID mutation rejection checks.
 6. Delete a note through its confirmation prompt and refresh to confirm deletion.
 7. To test live notification delivery, click Notify Slack on one Lead and inspect the configured channel. This action posts the Lead fields to Slack.
 
@@ -577,7 +589,7 @@ Paths in this document are relative to the repository root.
 | File | Component or export | Responsibility |
 | --- | --- | --- |
 | [app/layout.tsx](../app/layout.tsx) | `RootLayout`, `metadata` | Sets the page title, description, and Geist fonts. Wraps all routes in `ClerkProvider`, then `ConvexClientProvider`. |
-| [app/page.tsx](../app/page.tsx) | `Home` | Server component that awaits `auth.protect()` before rendering `LeadDashboard`. |
+| [app/page.tsx](../app/page.tsx) | `Home` | Server component that checks Clerk session and approval before rendering `LeadDashboard`. |
 | [app/loading.tsx](../app/loading.tsx) | `Loading` | Displays the homepage loading state. Provides a Suspense boundary for the page with Cache Components enabled. |
 | [proxy.ts](../proxy.ts) | `clerkMiddleware`, matcher | Makes Clerk session information available on matched application and API requests. Authentication checks also live in each protected page or endpoint. |
 | [app/sign-in/[[...sign-in]]/page.tsx](../app/sign-in/[[...sign-in]]/page.tsx) | `SignInPage` | Renders Clerk's `SignIn` component inside Suspense. |
@@ -589,10 +601,10 @@ Paths in this document are relative to the repository root.
 
 [LeadDashboard](../app/components/lead-dashboard.tsx) is a client component with the following responsibilities.
 
-- Fetch `/api/leads` on mount and after a retry. Abort the fetch when the component unmounts.
+- Fetch `/api/leads` on mount, after filter or cursor changes, and on retry. Abort requests when their inputs change or the component unmounts.
 - Show loading, error, retry, and empty-result states.
-- Search loaded names, companies, and emails locally, with case-insensitive matching.
-- Build the status filter from the returned records, including custom Salesforce statuses.
+- Send the name, company, or email search term to Salesforce through the server API.
+- Populate the status filter from the first page's status list, including custom Salesforce statuses.
 - Show the loaded count plus cards for the first three alphabetically sorted statuses. Counts reflect the entire loaded result set.
 - Render Name, Company, Email, Status, and Actions columns. Missing email displays as an em dash.
 - Keep the wide table inside a horizontally scrollable, keyboard-focusable region.
@@ -632,7 +644,7 @@ Its states are `idle`, `sending`, `sent`, and `error`. A ref prevents overlappin
 | [tsconfig.json](../tsconfig.json) | Strict application TypeScript configuration and the `@/*` repository-root alias. |
 | [convex/tsconfig.json](../convex/tsconfig.json) | TypeScript configuration for Convex functions. |
 | [eslint.config.mjs](../eslint.config.mjs) | Next.js/TypeScript lint rules and generated-file ignores. |
-| [vitest.config.mts](../vitest.config.mts) | Runs `convex/**/*.test.ts` in the edge runtime. |
+| [vitest.config.mts](../vitest.config.mts) | Runs Convex and application tests. Convex tests use the edge runtime and route tests select the Node.js environment. |
 | [package.json](../package.json) | Runtime dependencies, development tooling, and npm scripts. |
 | [package-lock.json](../package-lock.json) | Resolved dependency versions for reproducible installs. |
 | [AGENTS.md](../AGENTS.md), [CLAUDE.md](../CLAUDE.md) | Repository guidance for coding agents. |
@@ -646,12 +658,13 @@ Declared runtime versions are Next.js `16.4.6`, React/React DOM `19.3.0`, Clerk 
 | --- | --- |
 | Notes remain at “Checking authentication…” | Confirm `npx convex dev` is running for a local URL, the browser can reach that backend, and the URL matches the selected target. Then check `/auth-test`. |
 | Clerk works but Convex rejects authentication | Check the Convex issuer, Clerk Convex integration or JWT template, expected `convex` audience, and whether backend auth configuration has synchronized. |
+| Signed-in user sees Access Denied or an API returns `403` | Check the exact Clerk user ID and `AUTHORIZED_CLERK_USER_IDS` in the runtime serving the request. For Vercel, verify the environment and deployment. |
 | Notes show a function/configuration error | Apply the current schema and functions to the intended development backend and regenerate bindings through Convex tooling. |
 | Salesforce configuration error | Set all three server variables and use a My Domain HTTPS origin without an extra path or query. |
 | Salesforce OAuth failure | Check External Client App credentials, client credentials enablement, and Run As assignment. |
 | Salesforce query failure | Check Run As API access, Lead/field read permissions, and API availability. |
 | Slack configuration error | Check `SLACK_WEBHOOK_URL` in the Next.js environment and its `hooks.slack.com/services/...` format. |
-| Slack says the Lead is absent | Refresh the dashboard because the record may have moved out of the newest 20 results. |
+| Slack says the Lead is absent | Confirm the record still exists and the Salesforce Run As user can see it. |
 | Slack rejects delivery | Check webhook validity, destination channel, and workspace restrictions. |
 | Slack delivery is uncertain | Inspect the channel before retrying to avoid duplicate messages. |
 | Production build fails with a port-binding error | Run the build in an environment permitting Turbopack worker processes and local port binding. |
