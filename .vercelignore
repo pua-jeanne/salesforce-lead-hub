@@ -1,4 +1,6 @@
 .env*
+*.pem
+.vercel/
 .convex/
 .agents/
 .claude/

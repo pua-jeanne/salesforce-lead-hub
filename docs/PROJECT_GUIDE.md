@@ -1,12 +1,11 @@
 <!-- Describes the Lead Hub architecture, integrations, data model, and deployment. -->
 
-# Salesforce Lead Hub architecture
+# Salesforce Lead Hub technical project guide
 
 | Document attribute | Value |
 | --- | --- |
 | System | Salesforce Lead Hub |
-| Architecture baseline | Repository implementation reviewed November 21, 2026 |
-| Audience | Developers, technical reviewers, and assignment evaluators |
+| Audience | Developers, engineering leads, and solution architects |
 | Scope | Application structure, integration contracts, data ownership, security, and local operation |
 | Architecture style | Single-tenant Next.js application with an authenticated Convex notes backend |
 
@@ -21,7 +20,7 @@ The architecture supports four core capabilities.
 - Persist private notes in Convex with ownership enforced on the backend.
 - Send user-triggered notifications to a configured Slack channel.
 
-This document describes implemented behavior. Architectural rationale in the decision table is inferred from the source code. The assignment demo uses the hosted topology in Section 14. Production Clerk configuration and service-level targets require a future deployment design.
+This document describes implemented behavior. Architectural rationale in the decision table is inferred from the source code. The hosted portfolio demo is described in Section 14. A production rollout would require a review of identity configuration, operational controls, and service-level targets.
 
 ## 2. System context
 
@@ -432,7 +431,9 @@ Runtime authentication and external-service responses determine feature availabi
 ## 12. Constraints and known limitations
 
 - The dashboard starts with 20 Salesforce records and can load more. Search and filters run in Salesforce. Summary counts reflect the loaded rows.
+- Cursor pagination follows live Salesforce data. Record changes between requests can affect which rows appear.
 - All approved app users share the Run As user's Salesforce view and the configured Slack destination.
+- Slack messages include the Lead record ID and any available email address. Treat the destination channel as a recipient of CRM data.
 - Notes use a syntactically validated Salesforce ID as a reference. They can remain in Convex after the corresponding Salesforce Lead is deleted or becomes unavailable.
 - Concurrent edits to one note apply in transaction order. The UI has no version-conflict prompt, and deletion is permanent through the current API.
 - An unreachable local Convex backend can leave authentication pending until connectivity returns.
@@ -477,7 +478,7 @@ Retain any existing Clerk redirect settings. Convex tooling may also maintain si
 
 ### Convex authentication setup
 
-Configure `CLERK_JWT_ISSUER_DOMAIN` in the selected Convex backend's environment to match the Clerk token issuer. The audience expected by `convex/auth.config.ts` is `convex`.
+Configure `CLERK_JWT_ISSUER_DOMAIN` in the selected Convex backend's environment to match the Clerk token issuer. Enable the Convex integration in the matching Clerk instance so Clerk can issue a token for the `convex` audience expected by `convex/auth.config.ts`. Use the Clerk Frontend API URL including `https://` as the issuer.
 
 For the existing local/development target, the configuration command is the following. Replace the example issuer with the matching Clerk Frontend API URL.
 
@@ -493,8 +494,6 @@ Keep Clerk registration in Invite-only mode. After a user accepts an invitation,
 
 ### Salesforce setup
 
-The development OAuth identity was verified on November 12, 2026 as **Jeanne Pauline Pua-Martinez**, username `jeanne.pauline.b.pua@mindful-impala-4sjrel.com`. This account is the Run As user selected in the Salesforce External Client App configuration. The application resolves the identity through OAuth, so changing the app's Run As selection changes the integration identity for subsequent token requests. Recheck that selection when using another environment.
-
 Use the configured External Client App with OAuth client credentials enabled, a Run As user, and API access. The Run As user needs permission to read Lead and the selected fields. Use the Salesforce My Domain origin for `SALESFORCE_LOGIN_URL` and the app's matching consumer key and secret for the other variables.
 
 ### Slack setup
@@ -503,28 +502,15 @@ Use a Slack app with Incoming Webhooks enabled and a webhook authorized for the 
 
 ## 14. Development runtime topology
 
-### Hosted assignment demo
+### Hosted portfolio demo
 
-The assignment demo was deployed on November 13, 2026.
+The [live application](https://salesforce-lead-hub.vercel.app) is served by Vercel and requires an approved Clerk account. Configure each Vercel environment with its matching Clerk instance, Convex URL, and server-side integration credentials. Set the matching Clerk issuer and approved user IDs separately in the corresponding Convex backend. Changes to Vercel environment variables take effect on a new deployment using that environment scope.
 
-| Component | Hosted target |
-| --- | --- |
-| Application | https://salesforce-lead-hub.vercel.app |
-| Vercel project | `puajeanne-3313/salesforce-lead-hub` |
-| Frontend environment | Vercel Production environment, configured as an assignment demo |
-| Convex backend | `kindly-axolotl-963`, hosted development deployment |
-| Convex client URL | `https://kindly-axolotl-963.convex.cloud` |
-| Authentication | Existing Clerk development instance |
-
-Vercel stores the approved server credentials in secret environment variables. `.vercelignore` excludes environment files, local backend state, dependencies, build output, and local agent directories from source uploads. `.vercel/` holds the local Vercel project link and is ignored by Git.
-
-The hosted Convex backend has separate note storage. Existing local notes were left in the local backend. Local `.env.local` continues to select the backend at `http://127.0.0.1:3210`. Updates synchronized to that local backend must also be applied to the intended hosted development backend to appear in the demo.
-
-The stable Vercel alias serves the latest deployed frontend. Local source changes require another deployment through the linked Vercel project. Server environment changes require a new Vercel deployment to take effect.
+Local and hosted Convex backends have separate note storage. Apply backend schema and function changes to the intended hosted target as part of a release. Git and Vercel source uploads exclude local environment files.
 
 ### Local runtime
 
-Install dependencies with `npm ci`. Then keep both processes running in separate terminals.
+Use Node.js 24 to match CI. Install dependencies with `npm ci`, configure the services in Section 13, and keep both processes running in separate terminals.
 
 ```bash
 # Terminal 1
@@ -554,7 +540,7 @@ npm test
 npm run build
 ```
 
-`npm run build` creates a local production build. `npm start` serves a successful production build. The existing `next/font/google` setup can require network access during builds. Earlier restricted build attempts encountered a Turbopack worker port-binding failure. The local production build and the Vercel-hosted build both passed on November 13, 2026.
+`npm run build` creates a local production build. `npm start` serves a successful production build. The existing `next/font/google` setup can require network access during builds. A build also needs the app’s browser-visible configuration. If a restricted environment blocks Turbopack from starting its CSS worker, try `npm run build -- --webpack`. Use the manual checks below to validate each deployed environment.
 
 ### GitHub Actions and Vercel
 
@@ -568,7 +554,7 @@ GitHub Actions validates the change. Vercel handles Preview and Production deplo
 - [tests/route-authorization.test.ts](../tests/route-authorization.test.ts) covers homepage access, Leads and Slack API authorization, and Slack origin and record lookup checks.
 - [tests/salesforce-leads.test.ts](../tests/salesforce-leads.test.ts) covers page boundaries and tie-breaking, filter escaping, invalid cursors, and upstream failures.
 
-Browser behavior and live integration delivery can be checked using the steps below.
+These suites invoke route handlers directly, mock Salesforce and Slack, and exercise Convex in process. Browser sign-in, live Salesforce OAuth and Slack delivery, and Vercel Preview and Production smoke checks are manual.
 
 ### Manual checks
 
